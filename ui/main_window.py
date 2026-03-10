@@ -253,19 +253,26 @@ class MainWindow(QMainWindow):
     def _build_menu(self):
         mb = self.menuBar()
 
+        def action(text: str, slot, shortcut: str = "") -> QAction:
+            act = QAction(text, self)
+            act.triggered.connect(slot)
+            if shortcut:
+                act.setShortcut(shortcut)
+            return act
+
         vault_menu = mb.addMenu("Vault")
-        vault_menu.addAction("New Entry",    self._new_entry,      "Ctrl+N")
-        vault_menu.addAction("Refresh",      self.vault_view.refresh, "F5")
+        vault_menu.addAction(action("New Entry",   self._new_entry,             "Ctrl+N"))
+        vault_menu.addAction(action("Refresh",     self.vault_view.refresh,     "F5"))
         vault_menu.addSeparator()
-        vault_menu.addAction("Lock Vault",   self._lock,           "Ctrl+L")
-        vault_menu.addAction("Quit",         self.close,           "Ctrl+Q")
+        vault_menu.addAction(action("Lock Vault",  self._lock,                  "Ctrl+L"))
+        vault_menu.addAction(action("Quit",        self.close,                  "Ctrl+Q"))
 
         tools_menu = mb.addMenu("Tools")
-        tools_menu.addAction("Password Health Check", self._goto_health)
-        tools_menu.addAction("Steganography",         self._open_stego)
+        tools_menu.addAction(action("Password Health Check",   self._goto_health))
+        tools_menu.addAction(action("Steganography",           self._open_stego))
         tools_menu.addSeparator()
-        tools_menu.addAction("Change Master Password", self._change_password)
-        tools_menu.addAction("Setup Secret Questions", self._setup_questions)
+        tools_menu.addAction(action("Change Master Password",  self._change_password))
+        tools_menu.addAction(action("Setup Secret Questions",  self._setup_questions))
 
     # ── Navigation ────────────────────────────────────────────────
 

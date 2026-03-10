@@ -21,15 +21,15 @@ from db.schema import init_db
 
 
 def main():
+    # Must be set BEFORE creating QApplication
+    QApplication.setHighDpiScaleFactorRoundingPolicy(
+        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+    )
+
     app = QApplication(sys.argv)
     app.setApplicationName("ShadowVault")
     app.setApplicationVersion("1.0.0")
     app.setOrganizationName("ShadowVault")
-
-    # High DPI support
-    app.setHighDpiScaleFactorRoundingPolicy(
-        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
-    )
 
     # Apply dark theme
     app.setStyleSheet(DARK_STYLESHEET)
