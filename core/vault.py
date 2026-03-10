@@ -1,11 +1,12 @@
 """
 Vault CRUD operations for ShadowVault.
 All sensitive fields are encrypted with the session DEK before storage.
+
+Recovery functions (unlock_with_recovery_key, change_master_password, etc.)
+live in core.recovery and are re-exported here for convenience.
 """
 from __future__ import annotations
-import json
-from dataclasses import dataclass, field
-from datetime import datetime
+from dataclasses import dataclass
 from typing import Optional
 
 from db.schema import get_connection
@@ -14,10 +15,20 @@ from core.crypto import (
     wrap_dek, unwrap_dek,
     derive_kek, make_verification, verify_kek,
     generate_dek, generate_salt, generate_recovery_key,
-    argon2_params_to_json, parse_recovery_key,
-    aes_encrypt, aes_decrypt,
+    argon2_params_to_json,
 )
 from cryptography.exceptions import InvalidTag
+
+# Re-export recovery API so existing UI imports keep working unchanged
+from core.recovery import (                             # noqa: F401
+    unlock_with_recovery_key,
+    unlock_with_secret_questions,
+    has_secret_questions,
+    save_secret_questions,
+    get_secret_questions,
+    change_master_password,
+    store_recovery_key,
+)
 
 
 @dataclass
@@ -44,30 +55,24 @@ def create_vault(master_password: str, vault_name: str = "My Vault") -> tuple[by
     kek_salt = generate_salt()
     kek = derive_kek(master_password, kek_salt)
     verification = make_verification(kek)
-
     kek_enc_dek = wrap_dek(kek, dek)
-
-    recovery_raw, recovery_display = generate_recovery_key()
-    rec_salt = generate_salt()
-    rec_kek = derive_kek(recovery_raw, rec_salt)
-    recovery_enc_dek = wrap_dek(rec_kek, dek)
 
     with get_connection() as conn:
         cur = conn.execute(
             "INSERT INTO vault (name) VALUES (?)", (vault_name,)
         )
         vault_id = cur.lastrowid
-
         conn.execute(
             "INSERT INTO user_auth (vault_id, kek_salt, argon2_params, verification) VALUES (?,?,?,?)",
             (vault_id, kek_salt, argon2_params_to_json(), verification),
         )
         conn.execute(
-            "INSERT INTO key_store (vault_id, kek_enc_dek, recovery_enc_dek) VALUES (?,?,?)",
-            (vault_id, kek_enc_dek,
-             rec_salt + recovery_enc_dek),   # prepend salt so we can re-derive
+            "INSERT INTO key_store (vault_id, kek_enc_dek) VALUES (?,?)",
+            (vault_id, kek_enc_dek),
         )
 
+    # Delegate recovery key generation to recovery module
+    recovery_display = store_recovery_key(vault_id, dek)
     return dek, recovery_display
 
 
@@ -100,122 +105,8 @@ def unlock_vault(master_password: str) -> Optional[bytes]:
     return dek
 
 
-def unlock_with_recovery_key(recovery_display: str) -> Optional[bytes]:
-    """Try to unlock the vault using the emergency recovery key."""
-    try:
-        recovery_raw = parse_recovery_key(recovery_display)
-    except ValueError:
-        return None
-
-    with get_connection() as conn:
-        ks = conn.execute(
-            "SELECT recovery_enc_dek FROM key_store LIMIT 1"
-        ).fetchone()
-        if not ks or not ks["recovery_enc_dek"]:
-            return None
-
-        blob = bytes(ks["recovery_enc_dek"])
-        rec_salt, enc_dek = blob[:16], blob[16:]
-
-        rec_kek = derive_kek(recovery_raw, rec_salt)
-        try:
-            dek = unwrap_dek(rec_kek, enc_dek)
-        except (InvalidTag, Exception):
-            return None
-
-    return dek
 
 
-def change_master_password(old_dek: bytes, new_password: str) -> bool:
-    """Re-wrap DEK with a new master password KEK."""
-    new_kek_salt = generate_salt()
-    new_kek = derive_kek(new_password, new_kek_salt)
-    new_kek_enc_dek = wrap_dek(new_kek, old_dek)
-    new_verification = make_verification(new_kek)
-
-    with get_connection() as conn:
-        vault = conn.execute("SELECT id FROM vault LIMIT 1").fetchone()
-        if not vault:
-            return False
-        vid = vault["id"]
-        conn.execute(
-            "UPDATE user_auth SET kek_salt=?, verification=? WHERE vault_id=?",
-            (new_kek_salt, new_verification, vid),
-        )
-        conn.execute(
-            "UPDATE key_store SET kek_enc_dek=? WHERE vault_id=?",
-            (new_kek_enc_dek, vid),
-        )
-    return True
-
-
-# ── Secret questions ─────────────────────────────────────────────
-
-def save_secret_questions(dek: bytes, questions_answers: list[tuple[str, str]]) -> bool:
-    """
-    Hash answers and store questions. Also create a questions-based DEK envelope.
-    questions_answers: list of (question, answer) pairs (min 3).
-    """
-    combined = "|".join(a.strip().lower() for _, a in questions_answers).encode()
-    q_salt = generate_salt()
-    q_kek = derive_kek(combined, q_salt)
-    q_enc_dek = wrap_dek(q_kek, dek)
-
-    with get_connection() as conn:
-        vault = conn.execute("SELECT id FROM vault LIMIT 1").fetchone()
-        if not vault:
-            return False
-        vid = vault["id"]
-
-        conn.execute("DELETE FROM secret_question WHERE vault_id=?", (vid,))
-        for q, a in questions_answers:
-            a_salt = generate_salt()
-            a_hash = derive_kek(a.strip().lower(), a_salt)   # reuse Argon2id
-            conn.execute(
-                "INSERT INTO secret_question (vault_id, question, answer_hash, salt) VALUES (?,?,?,?)",
-                (vid, q, a_hash, a_salt),
-            )
-        conn.execute(
-            "UPDATE key_store SET questions_enc_dek=? WHERE vault_id=?",
-            (q_salt + q_enc_dek, vid),
-        )
-    return True
-
-
-def get_secret_questions() -> list[str]:
-    with get_connection() as conn:
-        rows = conn.execute(
-            "SELECT question FROM secret_question ORDER BY id"
-        ).fetchall()
-    return [r["question"] for r in rows]
-
-
-def unlock_with_secret_questions(answers: list[str]) -> Optional[bytes]:
-    """Try to unlock vault using secret question answers."""
-    combined = "|".join(a.strip().lower() for a in answers).encode()
-
-    with get_connection() as conn:
-        ks = conn.execute(
-            "SELECT questions_enc_dek FROM key_store LIMIT 1"
-        ).fetchone()
-        if not ks or not ks["questions_enc_dek"]:
-            return None
-
-        blob = bytes(ks["questions_enc_dek"])
-        q_salt, enc_dek = blob[:16], blob[16:]
-        q_kek = derive_kek(combined, q_salt)
-        try:
-            return unwrap_dek(q_kek, enc_dek)
-        except (InvalidTag, Exception):
-            return None
-
-
-def has_secret_questions() -> bool:
-    with get_connection() as conn:
-        ks = conn.execute(
-            "SELECT questions_enc_dek FROM key_store LIMIT 1"
-        ).fetchone()
-        return bool(ks and ks["questions_enc_dek"])
 
 
 # ── Entry CRUD ───────────────────────────────────────────────────
