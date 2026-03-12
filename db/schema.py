@@ -2,6 +2,7 @@
 Database schema and connection management for ShadowVault.
 """
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 
 DB_PATH = Path.home() / ".shadowvault" / "vault.db"
@@ -65,13 +66,28 @@ END;
 """
 
 
-def get_connection() -> sqlite3.Connection:
+@contextmanager
+def get_connection():
+    """
+    Context manager that opens a SQLite connection, commits on success,
+    rolls back on exception, and ALWAYS closes the connection.
+
+    Using check_same_thread=False so this is safe from worker threads.
+    Not using WAL mode to avoid cross-process/cross-session lock issues on Windows.
+    """
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
-    return conn
+    conn.execute("PRAGMA journal_mode = DELETE")   # safest for single-process app
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def init_db():
@@ -94,3 +110,8 @@ def drop_all():
     """Delete the database file (for reset)."""
     if DB_PATH.exists():
         DB_PATH.unlink()
+    # Also remove WAL/SHM files if they exist
+    for ext in ("-wal", "-shm", "-journal"):
+        p = DB_PATH.parent / (DB_PATH.name + ext)
+        if p.exists():
+            p.unlink()

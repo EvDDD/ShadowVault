@@ -321,17 +321,9 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     def _show_recovery_key(self, key: str):
-        msg = QMessageBox(self)
-        msg.setWindowTitle("🔑 Save Your Recovery Key")
-        msg.setIcon(QMessageBox.Icon.Warning)
-        msg.setText(
-            "<b>Your Emergency Recovery Key has been generated.</b><br><br>"
-            "Store this key somewhere safe (printed, USB, etc.).<br>"
-            "Without it, you cannot recover your vault if you forget your master password.<br><br>"
-            f"<code style='font-size:14px; letter-spacing:2px'>{key}</code>"
-        )
-        msg.setStandardButtons(QMessageBox.StandardButton.Ok)
-        msg.exec()
+        from ui.recovery_key_dialog import RecoveryKeyDialog
+        dlg = RecoveryKeyDialog(key, self)
+        dlg.exec()
 
     def _change_password(self):
         old_pw, ok = QInputDialog.getText(

@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QTabWidget, QWidget, QMessageBox, QFrame,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QThread
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont
 
 from core.recovery import (
@@ -16,17 +16,6 @@ from core.recovery import (
     save_secret_questions, change_master_password,
 )
 
-
-# ── Background worker ─────────────────────────────────────────────
-class _RecoveryWorker(QThread):
-    done = pyqtSignal(object)   # bytes | None
-
-    def __init__(self, fn, *args):
-        super().__init__()
-        self._fn, self._args = fn, args
-
-    def run(self):
-        self.done.emit(self._fn(*self._args))
 
 
 # ── Recovery dialog ───────────────────────────────────────────────
@@ -37,7 +26,6 @@ class RecoveryDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Account Recovery — ShadowVault")
         self.setFixedSize(460, 500)
-        self._worker = None
         self._build_ui()
 
     def _build_ui(self):
@@ -111,6 +99,9 @@ class RecoveryDialog(QDialog):
         return w
 
     def _do_key_recovery(self):
+        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtGui import QCursor
+        from PyQt6.QtCore import Qt
         key_str = self.key_input.text().strip().upper()
         new_pw  = self.key_new_pw.text()
         conf    = self.key_conf.text()
@@ -122,13 +113,18 @@ class RecoveryDialog(QDialog):
         if new_pw != conf:
             self.key_err.setText("Passwords do not match."); return
 
-        self._set_key_busy(True)
-        self._worker = _RecoveryWorker(unlock_with_recovery_key, key_str)
-        self._worker.done.connect(lambda dek: self._on_key_done(dek, new_pw))
-        self._worker.start()
+        self.btn_key.setEnabled(False)
+        self.btn_key.setText("Verifying…")
+        self.key_err.setText("")
+        QApplication.setOverrideCursor(QCursor(Qt.CursorShape.WaitCursor))
+        QApplication.processEvents()
+        try:
+            dek = unlock_with_recovery_key(key_str)
+        finally:
+            QApplication.restoreOverrideCursor()
+            self.btn_key.setEnabled(True)
+            self.btn_key.setText("Recover with Key")
 
-    def _on_key_done(self, dek, new_pw: str):
-        self._set_key_busy(False)
         if dek is None:
             self.key_err.setText(
                 "❌  Invalid recovery key. Check format: XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX"
@@ -139,15 +135,6 @@ class RecoveryDialog(QDialog):
             "Recovery successful. Your master password has been reset.")
         self.recovered.emit(dek)
         self.accept()
-
-    def _set_key_busy(self, busy: bool):
-        self.btn_key.setEnabled(not busy)
-        self.btn_key.setText("Verifying…" if busy else "Recover with Key")
-        self.key_input.setEnabled(not busy)
-        self.key_new_pw.setEnabled(not busy)
-        self.key_conf.setEnabled(not busy)
-        if busy:
-            self.key_err.setText("")
 
     # ── Tab 2: Secret Questions ──────────────────────────────────
 
@@ -194,6 +181,9 @@ class RecoveryDialog(QDialog):
         return w
 
     def _do_question_recovery(self):
+        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtGui import QCursor
+        from PyQt6.QtCore import Qt
         answers = [inp.text() for inp in self.answer_inputs]
         new_pw  = self.q_new_pw.text()
         conf    = self.q_conf.text()
@@ -207,13 +197,16 @@ class RecoveryDialog(QDialog):
 
         self.btn_q.setEnabled(False)
         self.btn_q.setText("Verifying…")
-        self._worker = _RecoveryWorker(unlock_with_secret_questions, answers)
-        self._worker.done.connect(lambda dek: self._on_q_done(dek, new_pw))
-        self._worker.start()
+        self.q_err.setText("")
+        QApplication.setOverrideCursor(QCursor(Qt.CursorShape.WaitCursor))
+        QApplication.processEvents()
+        try:
+            dek = unlock_with_secret_questions(answers)
+        finally:
+            QApplication.restoreOverrideCursor()
+            self.btn_q.setEnabled(True)
+            self.btn_q.setText("Recover with Answers")
 
-    def _on_q_done(self, dek, new_pw: str):
-        self.btn_q.setEnabled(True)
-        self.btn_q.setText("Recover with Answers")
         if dek is None:
             self.q_err.setText("❌  Incorrect answers. Access denied."); return
         change_master_password(dek, new_pw)

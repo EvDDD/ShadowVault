@@ -1,50 +1,20 @@
 """
 Login / Create Vault dialog for ShadowVault.
-Uses QThread for KDF so the UI never freezes.
+Runs KDF synchronously — PBKDF2/Argon2 takes <1s which is acceptable for login.
+Using QThread previously introduced subtle SQLite threading issues on Windows.
 """
 from __future__ import annotations
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QTabWidget, QWidget, QFrame,
+    QPushButton, QTabWidget, QWidget, QFrame, QApplication,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QThread
-from PyQt6.QtGui import QFont
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QFont, QCursor
 
 from db.schema import vault_exists, init_db
 from core.vault import create_vault, unlock_vault
 
 
-# ── Background worker ─────────────────────────────────────────────
-class _UnlockWorker(QThread):
-    """Run the slow KDF in a background thread."""
-    done = pyqtSignal(object)   # emits bytes | None
-
-    def __init__(self, password: str):
-        super().__init__()
-        self._pw = password
-
-    def run(self):
-        self.done.emit(unlock_vault(self._pw))
-
-
-class _CreateWorker(QThread):
-    done    = pyqtSignal(bytes, str)   # dek, recovery_display
-    failed  = pyqtSignal(str)
-
-    def __init__(self, password: str, name: str):
-        super().__init__()
-        self._pw   = password
-        self._name = name
-
-    def run(self):
-        try:
-            dek, rec = create_vault(self._pw, self._name)
-            self.done.emit(dek, rec)
-        except Exception as e:
-            self.failed.emit(str(e))
-
-
-# ── Dialog ────────────────────────────────────────────────────────
 class LoginDialog(QDialog):
     unlocked = pyqtSignal(bytes, str)   # dek, recovery_display
 
@@ -52,9 +22,12 @@ class LoginDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("ShadowVault")
         self.setFixedSize(420, 520)
-        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.MSWindowsFixedSizeDialogHint)
-        self._worker = None
+        self.setWindowFlags(
+            Qt.WindowType.Dialog | Qt.WindowType.MSWindowsFixedSizeDialogHint
+        )
         self._build_ui()
+
+    # ── Build ─────────────────────────────────────────────────────
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -65,7 +38,8 @@ class LoginDialog(QDialog):
         hdr = QFrame()
         hdr.setStyleSheet("background:#161b22; border-bottom:1px solid #30363d;")
         hdr.setFixedHeight(118)
-        hl = QVBoxLayout(hdr); hl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hl = QVBoxLayout(hdr)
+        hl.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         logo = QLabel("🔒")
         logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -81,12 +55,17 @@ class LoginDialog(QDialog):
         sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
         sub.setStyleSheet("background:transparent; color:#8b949e; font-size:12px;")
 
-        hl.addWidget(logo); hl.addWidget(title); hl.addWidget(sub)
+        hl.addWidget(logo)
+        hl.addWidget(title)
+        hl.addWidget(sub)
         layout.addWidget(hdr)
 
         # Body
-        body = QWidget(); body.setStyleSheet("background:#0d1117;")
-        bl = QVBoxLayout(body); bl.setContentsMargins(28, 20, 28, 20); bl.setSpacing(12)
+        body = QWidget()
+        body.setStyleSheet("background:#0d1117;")
+        bl = QVBoxLayout(body)
+        bl.setContentsMargins(28, 20, 28, 20)
+        bl.setSpacing(12)
 
         self.tabs = QTabWidget()
         if vault_exists():
@@ -101,8 +80,11 @@ class LoginDialog(QDialog):
     # ── Unlock tab ────────────────────────────────────────────────
 
     def _unlock_tab(self) -> QWidget:
-        w = QWidget(); w.setStyleSheet("background:transparent;")
-        l = QVBoxLayout(w); l.setSpacing(10); l.setContentsMargins(0, 14, 0, 0)
+        w = QWidget()
+        w.setStyleSheet("background:transparent;")
+        l = QVBoxLayout(w)
+        l.setSpacing(10)
+        l.setContentsMargins(0, 14, 0, 0)
 
         l.addWidget(self._lbl("Master Password"))
         self.unlock_pw = self._field("Enter your master password", pw=True)
@@ -140,13 +122,19 @@ class LoginDialog(QDialog):
             self.unlock_err.setText("Please enter your master password.")
             return
 
-        self._set_unlock_busy(True)
-        self._worker = _UnlockWorker(pw)
-        self._worker.done.connect(self._on_unlock_done)
-        self._worker.start()
+        self.btn_unlock.setEnabled(False)
+        self.btn_unlock.setText("Verifying…")
+        self.unlock_err.setText("")
+        QApplication.setOverrideCursor(QCursor(Qt.CursorShape.WaitCursor))
+        QApplication.processEvents()
 
-    def _on_unlock_done(self, dek):
-        self._set_unlock_busy(False)
+        try:
+            dek = unlock_vault(pw)
+        finally:
+            QApplication.restoreOverrideCursor()
+            self.btn_unlock.setEnabled(True)
+            self.btn_unlock.setText("Unlock Vault")
+
         if dek is None:
             self.unlock_err.setText("❌  Incorrect master password. Please try again.")
             self.unlock_pw.clear()
@@ -155,18 +143,14 @@ class LoginDialog(QDialog):
             self.unlocked.emit(dek, "")
             self.accept()
 
-    def _set_unlock_busy(self, busy: bool):
-        self.btn_unlock.setEnabled(not busy)
-        self.btn_unlock.setText("Verifying…" if busy else "Unlock Vault")
-        self.unlock_pw.setEnabled(not busy)
-        if busy:
-            self.unlock_err.setText("")
-
     # ── Create tab ────────────────────────────────────────────────
 
     def _create_tab(self) -> QWidget:
-        w = QWidget(); w.setStyleSheet("background:transparent;")
-        l = QVBoxLayout(w); l.setSpacing(10); l.setContentsMargins(0, 14, 0, 0)
+        w = QWidget()
+        w.setStyleSheet("background:transparent;")
+        l = QVBoxLayout(w)
+        l.setSpacing(10)
+        l.setContentsMargins(0, 14, 0, 0)
 
         l.addWidget(self._lbl("Vault Name (optional)"))
         self.vault_name = self._field("My Vault")
@@ -189,7 +173,7 @@ class LoginDialog(QDialog):
         notice = QLabel("⚠  A Recovery Key will be generated — save it somewhere safe.")
         notice.setWordWrap(True)
         notice.setStyleSheet(
-            "color:#d29922; font-size:11px; background:#d2992211; "
+            "color:#d29922; font-size:11px; background:#d2992211;"
             "border:1px solid #d2992244; border-radius:4px; padding:6px 8px;"
         )
         l.addWidget(notice)
@@ -208,33 +192,34 @@ class LoginDialog(QDialog):
         pw2  = self.create_pw2.text()
 
         if not pw:
-            self.create_err.setText("Master password cannot be empty."); return
+            self.create_err.setText("Master password cannot be empty.")
+            return
         if len(pw) < 8:
-            self.create_err.setText("Password must be at least 8 characters."); return
+            self.create_err.setText("Password must be at least 8 characters.")
+            return
         if pw != pw2:
-            self.create_err.setText("Passwords do not match."); return
+            self.create_err.setText("Passwords do not match.")
+            return
 
-        self._set_create_busy(True)
-        init_db()
-        self._worker = _CreateWorker(pw, name)
-        self._worker.done.connect(self._on_create_done)
-        self._worker.failed.connect(self._on_create_failed)
-        self._worker.start()
+        self.btn_create.setEnabled(False)
+        self.btn_create.setText("Creating vault…")
+        self.create_err.setText("")
+        QApplication.setOverrideCursor(QCursor(Qt.CursorShape.WaitCursor))
+        QApplication.processEvents()
 
-    def _on_create_done(self, dek: bytes, recovery: str):
-        self._set_create_busy(False)
+        try:
+            init_db()
+            dek, recovery = create_vault(pw, name)
+        except Exception as e:
+            self.create_err.setText(f"Error: {e}")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+            self.btn_create.setEnabled(True)
+            self.btn_create.setText("Create Vault")
+
         self.unlocked.emit(dek, recovery)
         self.accept()
-
-    def _on_create_failed(self, msg: str):
-        self._set_create_busy(False)
-        self.create_err.setText(f"Error: {msg}")
-
-    def _set_create_busy(self, busy: bool):
-        self.btn_create.setEnabled(not busy)
-        self.btn_create.setText("Creating…" if busy else "Create Vault")
-        self.create_pw.setEnabled(not busy)
-        self.create_pw2.setEnabled(not busy)
 
     # ── Recovery ──────────────────────────────────────────────────
 
