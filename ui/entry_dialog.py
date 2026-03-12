@@ -1,18 +1,18 @@
 """
 Add / Edit Vault Entry dialog for ShadowVault.
-Includes inline password generator and real-time strength indicator.
+Uses QScrollArea so the password generator never gets clipped.
 """
 from __future__ import annotations
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QTextEdit, QFrame, QSlider, QCheckBox, QWidget,
+    QPushButton, QTextEdit, QFrame, QSlider, QCheckBox,
+    QWidget, QScrollArea,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont
 
 from core.vault import VaultEntry
 from core.password_gen import generate_password, check_strength
-from ui.styles import STRENGTH_COLORS
 
 try:
     import pyperclip
@@ -22,232 +22,233 @@ except ImportError:
 
 
 class EntryDialog(QDialog):
-    """Dialog to create or edit a vault entry."""
-
     saved = pyqtSignal(VaultEntry)
 
     def __init__(self, entry: VaultEntry | None = None, vault_id: int = 1, parent=None):
         super().__init__(parent)
-        self._entry = entry
+        self._entry    = entry
         self._vault_id = vault_id
-        self._is_edit = entry is not None
-
+        self._is_edit  = entry is not None
         self.setWindowTitle("Edit Entry" if self._is_edit else "New Entry")
-        self.setFixedSize(500, 680)
+        self.setMinimumSize(500, 580)
+        self.resize(520, 680)
         self._build_ui()
-
         if self._is_edit:
             self._populate()
 
     def _build_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(14)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        # Title
-        title = QLabel("Edit Entry" if self._is_edit else "New Entry")
-        title.setFont(QFont("Segoe UI", 15, QFont.Weight.Bold))
-        title.setStyleSheet("color: #58a6ff;")
-        layout.addWidget(title)
+        # Header
+        hdr = QFrame()
+        hdr.setStyleSheet("background:#161b22; border-bottom:1px solid #30363d;")
+        hdr.setFixedHeight(50)
+        hl = QHBoxLayout(hdr)
+        hl.setContentsMargins(20, 0, 20, 0)
+        lbl = QLabel("Edit Entry" if self._is_edit else "New Entry")
+        lbl.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
+        lbl.setStyleSheet("color:#58a6ff; background:transparent;")
+        hl.addWidget(lbl)
+        root.addWidget(hdr)
 
-        # ── Fields ──────────────────────────────────────────────
-        layout.addWidget(self._lbl("Entry Title *"))
+        # Scroll area wraps all form fields
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet("QScrollArea{background:#0d1117;border:none;}")
+
+        body = QWidget()
+        body.setStyleSheet("background:#0d1117;")
+        form = QVBoxLayout(body)
+        form.setContentsMargins(20, 14, 20, 14)
+        form.setSpacing(4)
+
+        def add_field(label, widget):
+            form.addWidget(self._lbl(label))
+            form.addWidget(widget)
+            form.addSpacing(6)
+
         self.f_title = self._input("e.g. Gmail")
-        layout.addWidget(self.f_title)
+        add_field("Entry Title *", self.f_title)
 
-        layout.addWidget(self._lbl("URL / Website"))
         self.f_url = self._input("https://")
-        layout.addWidget(self.f_url)
+        add_field("URL / Website", self.f_url)
 
-        layout.addWidget(self._lbl("Username / Email"))
         self.f_user = self._input("username@example.com")
-        layout.addWidget(self.f_user)
+        add_field("Username / Email", self.f_user)
 
-        layout.addWidget(self._lbl("Password *"))
-        pw_row = QHBoxLayout()
-        pw_row.setSpacing(8)
+        # Password + toggle + copy
+        form.addWidget(self._lbl("Password *"))
+        pw_row = QHBoxLayout(); pw_row.setSpacing(6)
         self.f_pw = QLineEdit()
         self.f_pw.setPlaceholderText("Enter or generate a password")
         self.f_pw.setEchoMode(QLineEdit.EchoMode.Password)
-        self.f_pw.setFixedHeight(38)
+        self.f_pw.setFixedHeight(36)
         self.f_pw.textChanged.connect(self._on_pw_changed)
 
-        self.btn_toggle = QPushButton("👁")
-        self.btn_toggle.setFixedSize(38, 38)
-        self.btn_toggle.setToolTip("Show/hide password")
-        self.btn_toggle.setCheckable(True)
-        self.btn_toggle.toggled.connect(self._toggle_pw_visibility)
-        self.btn_toggle.setStyleSheet("QPushButton { font-size: 16px; padding: 0; } ")
+        self.btn_eye = QPushButton("👁")
+        self.btn_eye.setFixedSize(36, 36)
+        self.btn_eye.setCheckable(True)
+        self.btn_eye.setToolTip("Show/hide")
+        self.btn_eye.toggled.connect(
+            lambda on: self.f_pw.setEchoMode(
+                QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password))
+
+        btn_copy_pw = QPushButton("📋")
+        btn_copy_pw.setFixedSize(36, 36)
+        btn_copy_pw.setToolTip("Copy password")
+        btn_copy_pw.clicked.connect(self._copy_pw)
 
         pw_row.addWidget(self.f_pw)
-        pw_row.addWidget(self.btn_toggle)
-        layout.addLayout(pw_row)
+        pw_row.addWidget(self.btn_eye)
+        pw_row.addWidget(btn_copy_pw)
+        form.addLayout(pw_row)
 
-        # Strength bar
+        # Strength indicator
         self.strength_bar = QFrame()
         self.strength_bar.setFixedHeight(4)
-        self.strength_bar.setStyleSheet("background: #30363d; border-radius: 2px;")
-        layout.addWidget(self.strength_bar)
-
+        self.strength_bar.setStyleSheet("background:#30363d; border-radius:2px;")
+        form.addWidget(self.strength_bar)
         self.strength_lbl = QLabel("")
-        self.strength_lbl.setStyleSheet("color: #8b949e; font-size: 11px;")
-        layout.addWidget(self.strength_lbl)
+        self.strength_lbl.setStyleSheet("color:#8b949e; font-size:11px;")
+        form.addWidget(self.strength_lbl)
+        form.addSpacing(10)
 
-        # ── Generator ────────────────────────────────────────────
-        gen_frame = QFrame()
-        gen_frame.setStyleSheet(
-            "QFrame { background: #161b22; border: 1px solid #30363d; border-radius: 6px; }"
+        # Generator box
+        gen = QFrame()
+        gen.setStyleSheet(
+            "QFrame{background:#161b22; border:1px solid #30363d; border-radius:8px;}"
         )
-        gen_layout = QVBoxLayout(gen_frame)
-        gen_layout.setContentsMargins(12, 10, 12, 10)
-        gen_layout.setSpacing(8)
+        gl = QVBoxLayout(gen)
+        gl.setContentsMargins(14, 10, 14, 12)
+        gl.setSpacing(8)
 
-        gen_hdr = QHBoxLayout()
-        gen_lbl = QLabel("Password Generator")
-        gen_lbl.setStyleSheet("background: transparent; color: #8b949e; font-size: 12px; font-weight: 600;")
-        gen_btn = QPushButton("Generate")
-        gen_btn.setObjectName("btnSecondary")
-        gen_btn.setFixedHeight(30)
-        gen_btn.clicked.connect(self._generate)
-        gen_hdr.addWidget(gen_lbl)
-        gen_hdr.addStretch()
-        gen_hdr.addWidget(gen_btn)
-        gen_layout.addLayout(gen_hdr)
+        gh = QHBoxLayout()
+        gtitle = QLabel("Password Generator")
+        gtitle.setStyleSheet("color:#8b949e; font-size:12px; font-weight:600; background:transparent;")
+        self.btn_gen = QPushButton("⚡ Generate")
+        self.btn_gen.setObjectName("btnSecondary")
+        self.btn_gen.setFixedHeight(28)
+        self.btn_gen.clicked.connect(self._generate)
+        gh.addWidget(gtitle); gh.addStretch(); gh.addWidget(self.btn_gen)
+        gl.addLayout(gh)
 
-        # Length slider
-        len_row = QHBoxLayout()
-        len_lbl = QLabel("Length:")
-        len_lbl.setStyleSheet("background: transparent; color: #8b949e; font-size: 12px;")
+        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color:#30363d; background:#30363d;"); sep.setFixedHeight(1)
+        gl.addWidget(sep)
+
+        lr = QHBoxLayout(); lr.setSpacing(8)
+        ll = QLabel("Length:"); ll.setFixedWidth(48)
+        ll.setStyleSheet("color:#8b949e; font-size:12px; background:transparent;")
         self.len_slider = QSlider(Qt.Orientation.Horizontal)
-        self.len_slider.setRange(8, 64)
-        self.len_slider.setValue(20)
-        self.len_slider.valueChanged.connect(self._update_len_label)
-        self.len_val = QLabel("20")
-        self.len_val.setFixedWidth(28)
-        self.len_val.setStyleSheet("background: transparent; color: #e6edf3; font-size: 12px;")
-        len_row.addWidget(len_lbl)
-        len_row.addWidget(self.len_slider)
-        len_row.addWidget(self.len_val)
-        gen_layout.addLayout(len_row)
+        self.len_slider.setRange(8, 64); self.len_slider.setValue(20)
+        self.len_val = QLabel("20"); self.len_val.setFixedWidth(22)
+        self.len_val.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.len_val.setStyleSheet("color:#e6edf3; font-size:12px; font-weight:600; background:transparent;")
+        self.len_slider.valueChanged.connect(lambda v: self.len_val.setText(str(v)))
+        lr.addWidget(ll); lr.addWidget(self.len_slider); lr.addWidget(self.len_val)
+        gl.addLayout(lr)
 
-        # Checkboxes
-        cb_row = QHBoxLayout()
-        self.cb_upper   = self._cb("A–Z",   True)
-        self.cb_lower   = self._cb("a–z",   True)
-        self.cb_digits  = self._cb("0–9",   True)
-        self.cb_symbols = self._cb("!@#…",  True)
+        cr = QHBoxLayout(); cr.setSpacing(4)
+        self.cb_upper   = self._cb("A–Z",  True)
+        self.cb_lower   = self._cb("a–z",  True)
+        self.cb_digits  = self._cb("0–9",  True)
+        self.cb_symbols = self._cb("!@#",  True)
         for cb in [self.cb_upper, self.cb_lower, self.cb_digits, self.cb_symbols]:
-            cb_row.addWidget(cb)
-        gen_layout.addLayout(cb_row)
-        layout.addWidget(gen_frame)
+            cr.addWidget(cb)
+        gl.addLayout(cr)
+        form.addWidget(gen)
+        form.addSpacing(10)
 
         # Notes
-        layout.addWidget(self._lbl("Notes"))
+        form.addWidget(self._lbl("Notes"))
         self.f_notes = QTextEdit()
         self.f_notes.setPlaceholderText("Optional notes…")
-        self.f_notes.setFixedHeight(70)
-        layout.addWidget(self.f_notes)
+        self.f_notes.setFixedHeight(68)
+        form.addWidget(self.f_notes)
+        form.addStretch()
 
-        layout.addStretch()
+        scroll.setWidget(body)
+        root.addWidget(scroll, 1)
 
-        # Buttons
-        btn_row = QHBoxLayout()
-        cancel = QPushButton("Cancel")
-        cancel.clicked.connect(self.reject)
-        save = QPushButton("Save Entry")
-        save.setObjectName("btnPrimary")
-        save.setFixedHeight(40)
-        save.clicked.connect(self._save)
-        btn_row.addWidget(cancel)
-        btn_row.addWidget(save)
-        layout.addLayout(btn_row)
+        # Footer buttons (always visible, outside scroll)
+        foot = QFrame()
+        foot.setStyleSheet("background:#161b22; border-top:1px solid #30363d;")
+        foot.setFixedHeight(56)
+        fl = QHBoxLayout(foot)
+        fl.setContentsMargins(20, 0, 20, 0); fl.setSpacing(10)
+        self.err_lbl = QLabel("")
+        self.err_lbl.setStyleSheet("color:#f85149; font-size:12px;")
+        fl.addWidget(self.err_lbl, 1)
+        btn_cancel = QPushButton("Cancel"); btn_cancel.setFixedHeight(34)
+        btn_cancel.clicked.connect(self.reject)
+        btn_save = QPushButton("Save Entry")
+        btn_save.setObjectName("btnPrimary"); btn_save.setFixedHeight(34); btn_save.setFixedWidth(100)
+        btn_save.clicked.connect(self._save)
+        fl.addWidget(btn_cancel); fl.addWidget(btn_save)
+        root.addWidget(foot)
 
-    def _lbl(self, text: str) -> QLabel:
+    def _lbl(self, text):
         l = QLabel(text)
-        l.setStyleSheet("color: #8b949e; font-size: 12px; font-weight: 600; margin-top: 2px;")
+        l.setStyleSheet("color:#8b949e; font-size:12px; font-weight:600;")
         return l
 
-    def _input(self, placeholder: str) -> QLineEdit:
-        e = QLineEdit()
-        e.setPlaceholderText(placeholder)
-        e.setFixedHeight(38)
-        return e
+    def _input(self, ph):
+        e = QLineEdit(); e.setPlaceholderText(ph); e.setFixedHeight(36); return e
 
-    def _cb(self, text: str, checked: bool = True) -> QCheckBox:
-        cb = QCheckBox(text)
-        cb.setChecked(checked)
-        cb.setStyleSheet("QCheckBox { background: transparent; color: #e6edf3; font-size: 12px; }")
+    def _cb(self, text, checked=True):
+        cb = QCheckBox(text); cb.setChecked(checked)
+        cb.setStyleSheet("QCheckBox{background:transparent;color:#e6edf3;font-size:12px;padding:2px 4px;}")
         return cb
 
     def _populate(self):
         e = self._entry
-        self.f_title.setText(e.title)
-        self.f_url.setText(e.url)
-        self.f_user.setText(e.username)
-        self.f_pw.setText(e.password)
+        self.f_title.setText(e.title); self.f_url.setText(e.url)
+        self.f_user.setText(e.username); self.f_pw.setText(e.password)
         self.f_notes.setPlainText(e.notes)
 
-    def _toggle_pw_visibility(self, checked: bool):
-        if checked:
-            self.f_pw.setEchoMode(QLineEdit.EchoMode.Normal)
-        else:
-            self.f_pw.setEchoMode(QLineEdit.EchoMode.Password)
-
-    def _update_len_label(self, val: int):
-        self.len_val.setText(str(val))
+    def _on_pw_changed(self, text):
+        if not text:
+            self.strength_bar.setStyleSheet("background:#30363d; border-radius:2px;")
+            self.strength_lbl.setText(""); return
+        r = check_strength(text)
+        pct = (r.score + 1) * 20
+        stop = min(pct / 100 + 0.001, 1.0)
+        self.strength_bar.setStyleSheet(
+            f"background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            f"stop:{pct/100:.3f} {r.color},stop:{stop:.3f} #30363d);border-radius:2px;")
+        self.strength_lbl.setText(f"{r.label}  ·  {r.entropy:.0f} bit  ·  Crack: {r.crack_time}")
+        self.strength_lbl.setStyleSheet(f"color:{r.color};font-size:11px;")
 
     def _generate(self):
         pw = generate_password(
             length=self.len_slider.value(),
-            use_upper=self.cb_upper.isChecked(),
-            use_lower=self.cb_lower.isChecked(),
-            use_digits=self.cb_digits.isChecked(),
-            use_symbols=self.cb_symbols.isChecked(),
+            use_upper=self.cb_upper.isChecked(), use_lower=self.cb_lower.isChecked(),
+            use_digits=self.cb_digits.isChecked(), use_symbols=self.cb_symbols.isChecked(),
         )
         self.f_pw.setText(pw)
         self.f_pw.setEchoMode(QLineEdit.EchoMode.Normal)
-        self.btn_toggle.setChecked(True)
+        self.btn_eye.setChecked(True)
 
-    def _on_pw_changed(self, text: str):
-        if not text:
-            self.strength_bar.setStyleSheet("background: #30363d; border-radius: 2px;")
-            self.strength_lbl.setText("")
-            return
-        result = check_strength(text)
-        color = result.color
-        pct = (result.score + 1) * 20
-        self.strength_bar.setStyleSheet(
-            f"background: qlineargradient(x1:0, y1:0, x2:1, y2:0, "
-            f"stop:{pct/100:.2f} {color}, stop:{pct/100+0.001:.3f} #30363d); "
-            f"border-radius: 2px;"
-        )
-        self.strength_lbl.setText(
-            f"{result.label}  ·  {result.entropy:.0f} bit  ·  Crack time: {result.crack_time}"
-        )
-        self.strength_lbl.setStyleSheet(f"color: {color}; font-size: 11px;")
+    def _copy_pw(self):
+        pw = self.f_pw.text()
+        if pw and _HAS_CLIP:
+            pyperclip.copy(pw)
 
     def _save(self):
         title = self.f_title.text().strip()
         pw    = self.f_pw.text()
         if not title:
-            self.f_title.setFocus()
-            self.f_title.setStyleSheet(
-                "QLineEdit { border: 1px solid #f85149; border-radius: 6px; "
-                "background: #161b22; color: #e6edf3; padding: 6px 10px; }"
-            )
-            return
+            self.err_lbl.setText("Title is required."); self.f_title.setFocus(); return
         if not pw:
-            self.f_pw.setFocus()
-            return
-
-        entry = VaultEntry(
+            self.err_lbl.setText("Password is required."); self.f_pw.setFocus(); return
+        self.err_lbl.setText("")
+        self.saved.emit(VaultEntry(
             id=self._entry.id if self._is_edit else None,
-            vault_id=self._vault_id,
-            title=title,
-            url=self.f_url.text().strip(),
-            username=self.f_user.text().strip(),
-            password=pw,
-            notes=self.f_notes.toPlainText().strip(),
-        )
-        self.saved.emit(entry)
+            vault_id=self._vault_id, title=title,
+            url=self.f_url.text().strip(), username=self.f_user.text().strip(),
+            password=pw, notes=self.f_notes.toPlainText().strip(),
+        ))
         self.accept()
