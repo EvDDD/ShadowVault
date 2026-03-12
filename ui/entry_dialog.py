@@ -89,7 +89,7 @@ class EntryDialog(QDialog):
         self.f_pw.textChanged.connect(self._on_pw_changed)
 
         self.btn_eye = QPushButton("👁")
-        self.btn_eye.setFixedSize(36, 36)
+        self.btn_eye.setFixedSize(45, 36)
         self.btn_eye.setCheckable(True)
         self.btn_eye.setToolTip("Show/hide")
         self.btn_eye.toggled.connect(
@@ -97,7 +97,7 @@ class EntryDialog(QDialog):
                 QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password))
 
         btn_copy_pw = QPushButton("📋")
-        btn_copy_pw.setFixedSize(36, 36)
+        btn_copy_pw.setFixedSize(45, 36)
         btn_copy_pw.setToolTip("Copy password")
         btn_copy_pw.clicked.connect(self._copy_pw)
 
