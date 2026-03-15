@@ -56,7 +56,7 @@ def unlock_with_recovery_key(recovery_display: str) -> Optional[bytes]:
 
     with get_connection() as conn:
         ks = conn.execute(
-            "SELECT recovery_enc_dek FROM key_store LIMIT 1"
+            "SELECT recovery_enc_dek, questions_enc_dek FROM key_store LIMIT 1"
         ).fetchone()
 
     if not ks or not ks["recovery_enc_dek"]:
@@ -76,7 +76,7 @@ def has_recovery_key() -> bool:
     """Return True if a recovery key envelope exists in key_store."""
     with get_connection() as conn:
         ks = conn.execute(
-            "SELECT recovery_enc_dek FROM key_store LIMIT 1"
+            "SELECT recovery_enc_dek, questions_enc_dek FROM key_store LIMIT 1"
         ).fetchone()
     return bool(ks and ks["recovery_enc_dek"])
 
@@ -171,29 +171,10 @@ def has_secret_questions() -> bool:
 
 
 # ── Change / Reset Master Password ───────────────────────────────
+# Handled by core.vault.change_master_password (requires RSA keypair regen).
+# Kept as thin wrapper for UI backward-compatibility.
 
 def change_master_password(dek: bytes, new_password: str) -> bool:
-    """
-    Re-wrap the DEK under a new master-password KEK.
-    The DEK itself never changes, so all vault entries remain intact.
-    Returns True on success.
-    """
-    new_salt         = generate_salt()
-    new_kek          = derive_kek(new_password, new_salt)
-    new_kek_enc_dek  = wrap_dek(new_kek, dek)
-    new_verification = make_verification(new_kek)
-
-    with get_connection() as conn:
-        vault = conn.execute("SELECT id FROM vault LIMIT 1").fetchone()
-        if not vault:
-            return False
-        vid = vault["id"]
-        conn.execute(
-            "UPDATE user_auth SET kek_salt=?, argon2_params=?, verification=? WHERE vault_id=?",
-            (new_salt, argon2_params_to_json(), new_verification, vid),
-        )
-        conn.execute(
-            "UPDATE key_store SET kek_enc_dek=? WHERE vault_id=?",
-            (new_kek_enc_dek, vid),
-        )
-    return True
+    """Delegate to vault module which manages the RSA keypair."""
+    from core.vault import change_master_password as _vault_change
+    return _vault_change(dek, new_password)
