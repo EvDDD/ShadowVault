@@ -51,10 +51,19 @@ class VaultEntry:
 
 # ── Vault lifecycle ───────────────────────────────────────────────
 
-def create_vault(master_password: str, vault_name: str = "My Vault") -> tuple[bytes, str]:
+def get_all_vaults() -> list[dict]:
+    """Return list of all vaults as [{id, name, created_at}, ...]."""
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT id, name, created_at FROM vault ORDER BY id"
+        ).fetchall()
+    return [{"id": r["id"], "name": r["name"], "created_at": r["created_at"]} for r in rows]
+
+
+def create_vault(master_password: str, vault_name: str = "My Vault") -> tuple[bytes, str, int]:
     """
     Create a new vault.
-    Returns (dek, recovery_key_display).
+    Returns (dek, recovery_key_display, vault_id).
 
     Key generation steps:
       1. generate_dek()          → random 256-bit DEK  (custom CSPRNG)
@@ -87,12 +96,15 @@ def create_vault(master_password: str, vault_name: str = "My Vault") -> tuple[by
         )
 
     recovery_display = store_recovery_key(vault_id, dek)
-    return dek, recovery_display
+    return dek, recovery_display, vault_id
 
 
-def unlock_vault(master_password: str) -> Optional[bytes]:
+def unlock_vault(master_password: str, vault_id: int = None) -> Optional[bytes]:
     """
     Verify master password and return DEK.
+
+    vault_id: the specific vault to unlock. If None, tries the first vault
+              (backward-compatible for single-vault usage).
 
     Unlock steps:
       1. Derive KEK from password (PBKDF2)
@@ -101,9 +113,15 @@ def unlock_vault(master_password: str) -> Optional[bytes]:
       4. Decrypt DEK with RSA private key  (RSA)
     """
     with get_connection() as conn:
-        auth = conn.execute(
-            "SELECT kek_salt, verification FROM user_auth LIMIT 1"
-        ).fetchone()
+        if vault_id is not None:
+            auth = conn.execute(
+                "SELECT kek_salt, verification FROM user_auth WHERE vault_id=?",
+                (vault_id,),
+            ).fetchone()
+        else:
+            auth = conn.execute(
+                "SELECT kek_salt, verification FROM user_auth LIMIT 1"
+            ).fetchone()
         if not auth:
             return None
 
@@ -111,9 +129,15 @@ def unlock_vault(master_password: str) -> Optional[bytes]:
         if not verify_kek(kek, bytes(auth["verification"])):
             return None
 
-        ks = conn.execute(
-            "SELECT kek_enc_rsa_priv, rsa_enc_dek FROM key_store LIMIT 1"
-        ).fetchone()
+        if vault_id is not None:
+            ks = conn.execute(
+                "SELECT kek_enc_rsa_priv, rsa_enc_dek FROM key_store WHERE vault_id=?",
+                (vault_id,),
+            ).fetchone()
+        else:
+            ks = conn.execute(
+                "SELECT kek_enc_rsa_priv, rsa_enc_dek FROM key_store LIMIT 1"
+            ).fetchone()
         if not ks:
             return None
 
@@ -123,21 +147,32 @@ def unlock_vault(master_password: str) -> Optional[bytes]:
         except (InvalidTag, Exception):
             return None
 
+        # Sanity check: DEK must be exactly 256 bits (32 bytes)
+        from core.crypto import DEK_LEN
+        if len(dek) != DEK_LEN:
+            return None
+
     return dek
 
 
-def change_master_password(dek: bytes, new_password: str) -> bool:
+def change_master_password(dek: bytes, new_password: str, vault_id: int = None) -> bool:
     """
     Change master password: re-encrypt RSA private key under new KEK.
     DEK and vault data are untouched.
     """
     with get_connection() as conn:
-        ks = conn.execute(
-            "SELECT vault_id, rsa_enc_dek FROM key_store LIMIT 1"
-        ).fetchone()
-        vault = conn.execute("SELECT id FROM vault LIMIT 1").fetchone()
-        if not ks or not vault:
+        if vault_id is not None:
+            ks = conn.execute(
+                "SELECT vault_id, rsa_enc_dek FROM key_store WHERE vault_id=?",
+                (vault_id,),
+            ).fetchone()
+        else:
+            ks = conn.execute(
+                "SELECT vault_id, rsa_enc_dek FROM key_store LIMIT 1"
+            ).fetchone()
+        if not ks:
             return False
+        vid = ks["vault_id"]
 
         # Re-derive RSA private key from old DEK and existing rsa_enc_dek is
         # not available directly — we need the keypair. Since we already have
@@ -154,7 +189,6 @@ def change_master_password(dek: bytes, new_password: str) -> bool:
         new_kek          = derive_kek(new_password, new_salt)
         new_kek_enc_priv = wrap_rsa_private(new_kek, new_keypair)
         new_verification = make_verification(new_kek)
-        vid = vault["id"]
 
         conn.execute(
             "UPDATE user_auth SET kek_salt=?, verification=? WHERE vault_id=?",
@@ -167,24 +201,17 @@ def change_master_password(dek: bytes, new_password: str) -> bool:
     return True
 
 
-def get_vault_name() -> str:
+def get_vault_name(vault_id: int = None) -> str:
     with get_connection() as conn:
-        row = conn.execute("SELECT name FROM vault LIMIT 1").fetchone()
+        if vault_id is not None:
+            row = conn.execute("SELECT name FROM vault WHERE id=?", (vault_id,)).fetchone()
+        else:
+            row = conn.execute("SELECT name FROM vault LIMIT 1").fetchone()
         return row["name"] if row else "My Vault"
 
 
-# ── Entry CRUD ────────────────────────────────────────────────────
-
-def _get_vault_id() -> int:
-    with get_connection() as conn:
-        row = conn.execute("SELECT id FROM vault LIMIT 1").fetchone()
-        if not row:
-            raise RuntimeError("No vault found.")
-        return row["id"]
-
-
-def add_entry(dek: bytes, entry: VaultEntry) -> int:
-    vid = _get_vault_id()
+def add_entry(dek: bytes, entry: VaultEntry, vault_id: int = None) -> int:
+    vid = vault_id if vault_id is not None else entry.vault_id
     with get_connection() as conn:
         cur = conn.execute(
             "INSERT INTO vault_entry (vault_id, title, url, username, enc_password, enc_notes)"
@@ -222,11 +249,17 @@ def delete_entry(entry_id: int) -> None:
         conn.execute("DELETE FROM vault_entry WHERE id=?", (entry_id,))
 
 
-def get_all_entries(dek: bytes, search: str = "") -> list[VaultEntry]:
+def get_all_entries(dek: bytes, search: str = "", vault_id: int = None) -> list[VaultEntry]:
     with get_connection() as conn:
-        rows = conn.execute(
-            "SELECT * FROM vault_entry ORDER BY title COLLATE NOCASE"
-        ).fetchall()
+        if vault_id is not None:
+            rows = conn.execute(
+                "SELECT * FROM vault_entry WHERE vault_id=? ORDER BY title COLLATE NOCASE",
+                (vault_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM vault_entry ORDER BY title COLLATE NOCASE"
+            ).fetchall()
     entries = []
     for row in rows:
         try:
@@ -261,3 +294,15 @@ def get_entry(dek: bytes, entry_id: int) -> Optional[VaultEntry]:
         notes=    decrypt_field(dek, bytes(row["enc_notes"])) if row["enc_notes"] else "",
         created_at=row["created_at"] or "", updated_at=row["updated_at"] or "",
     )
+
+
+def delete_vault(vault_id: int) -> int:
+    """
+    Delete a specific vault and all its related data (CASCADE).
+    Returns the number of remaining vaults.
+    """
+    with get_connection() as conn:
+        conn.execute("DELETE FROM vault WHERE id=?", (vault_id,))
+        remaining = conn.execute("SELECT COUNT(*) FROM vault").fetchone()[0]
+    return remaining
+

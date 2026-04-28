@@ -10,6 +10,7 @@ This module intentionally has NO knowledge of vault entries or CRUD.
 It only deals with the Key Store layer (KEK/DEK envelopes).
 """
 from __future__ import annotations
+import logging
 from typing import Optional
 
 from cryptography.exceptions import InvalidTag
@@ -22,6 +23,8 @@ from core.crypto import (
     argon2_params_to_json,
     SALT_LEN,
 )
+
+log = logging.getLogger(__name__)
 
 
 # ── Recovery Key ─────────────────────────────────────────────────
@@ -44,7 +47,7 @@ def store_recovery_key(vault_id: int, dek: bytes) -> str:
     return recovery_display
 
 
-def unlock_with_recovery_key(recovery_display: str) -> Optional[bytes]:
+def unlock_with_recovery_key(recovery_display: str, vault_id: int = None) -> Optional[bytes]:
     """
     Attempt to unwrap the DEK using an Emergency Recovery Key.
     Returns the DEK on success, None on failure.
@@ -55,9 +58,15 @@ def unlock_with_recovery_key(recovery_display: str) -> Optional[bytes]:
         return None
 
     with get_connection() as conn:
-        ks = conn.execute(
-            "SELECT recovery_enc_dek, questions_enc_dek FROM key_store LIMIT 1"
-        ).fetchone()
+        if vault_id is not None:
+            ks = conn.execute(
+                "SELECT recovery_enc_dek FROM key_store WHERE vault_id=?",
+                (vault_id,),
+            ).fetchone()
+        else:
+            ks = conn.execute(
+                "SELECT recovery_enc_dek FROM key_store LIMIT 1"
+            ).fetchone()
 
     if not ks or not ks["recovery_enc_dek"]:
         return None
@@ -72,18 +81,24 @@ def unlock_with_recovery_key(recovery_display: str) -> Optional[bytes]:
         return None
 
 
-def has_recovery_key() -> bool:
+def has_recovery_key(vault_id: int = None) -> bool:
     """Return True if a recovery key envelope exists in key_store."""
     with get_connection() as conn:
-        ks = conn.execute(
-            "SELECT recovery_enc_dek, questions_enc_dek FROM key_store LIMIT 1"
-        ).fetchone()
+        if vault_id is not None:
+            ks = conn.execute(
+                "SELECT recovery_enc_dek FROM key_store WHERE vault_id=?",
+                (vault_id,),
+            ).fetchone()
+        else:
+            ks = conn.execute(
+                "SELECT recovery_enc_dek FROM key_store LIMIT 1"
+            ).fetchone()
     return bool(ks and ks["recovery_enc_dek"])
 
 
 # ── Secret Questions ─────────────────────────────────────────────
 
-def save_secret_questions(dek: bytes, questions_answers: list[tuple[str, str]]) -> bool:
+def save_secret_questions(dek: bytes, questions_answers: list[tuple[str, str]], vault_id: int = None) -> bool:
     """
     Hash each answer individually (Argon2id/PBKDF2 + salt) for storage,
     and create a combined-answer KEK envelope wrapping the DEK.
@@ -101,10 +116,14 @@ def save_secret_questions(dek: bytes, questions_answers: list[tuple[str, str]]) 
     blob     = q_salt + wrap_dek(q_kek, dek)   # [salt(32) | enc_dek]
 
     with get_connection() as conn:
-        vault = conn.execute("SELECT id FROM vault LIMIT 1").fetchone()
-        if not vault:
-            return False
-        vid = vault["id"]
+        if vault_id is not None:
+            vid = vault_id
+        else:
+            vault = conn.execute("SELECT id FROM vault LIMIT 1").fetchone()
+            if not vault:
+                log.error("save_secret_questions: no vault found")
+                return False
+            vid = vault["id"]
 
         # Replace existing questions
         conn.execute("DELETE FROM secret_question WHERE vault_id=?", (vid,))
@@ -123,19 +142,26 @@ def save_secret_questions(dek: bytes, questions_answers: list[tuple[str, str]]) 
             "UPDATE key_store SET questions_enc_dek=? WHERE vault_id=?",
             (blob, vid),
         )
+        log.info("Saved %d secret questions for vault_id=%s", len(questions_answers), vid)
     return True
 
 
-def get_secret_questions() -> list[str]:
+def get_secret_questions(vault_id: int = None) -> list[str]:
     """Return the list of stored question texts, in insertion order."""
     with get_connection() as conn:
-        rows = conn.execute(
-            "SELECT question FROM secret_question ORDER BY id"
-        ).fetchall()
+        if vault_id is not None:
+            rows = conn.execute(
+                "SELECT question FROM secret_question WHERE vault_id=? ORDER BY id",
+                (vault_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT question FROM secret_question ORDER BY id"
+            ).fetchall()
     return [r["question"] for r in rows]
 
 
-def unlock_with_secret_questions(answers: list[str]) -> Optional[bytes]:
+def unlock_with_secret_questions(answers: list[str], vault_id: int = None) -> Optional[bytes]:
     """
     Attempt to unwrap the DEK using secret question answers.
     All answers must be provided in the same order as stored.
@@ -144,9 +170,15 @@ def unlock_with_secret_questions(answers: list[str]) -> Optional[bytes]:
     combined = "|".join(a.strip().lower() for a in answers).encode("utf-8")
 
     with get_connection() as conn:
-        ks = conn.execute(
-            "SELECT questions_enc_dek FROM key_store LIMIT 1"
-        ).fetchone()
+        if vault_id is not None:
+            ks = conn.execute(
+                "SELECT questions_enc_dek FROM key_store WHERE vault_id=?",
+                (vault_id,),
+            ).fetchone()
+        else:
+            ks = conn.execute(
+                "SELECT questions_enc_dek FROM key_store LIMIT 1"
+            ).fetchone()
 
     if not ks or not ks["questions_enc_dek"]:
         return None
@@ -161,20 +193,28 @@ def unlock_with_secret_questions(answers: list[str]) -> Optional[bytes]:
         return None
 
 
-def has_secret_questions() -> bool:
+def has_secret_questions(vault_id: int = None) -> bool:
     """Return True if a secret-questions envelope exists."""
     with get_connection() as conn:
-        ks = conn.execute(
-            "SELECT questions_enc_dek FROM key_store LIMIT 1"
-        ).fetchone()
-    return bool(ks and ks["questions_enc_dek"])
+        if vault_id is not None:
+            ks = conn.execute(
+                "SELECT questions_enc_dek FROM key_store WHERE vault_id=?",
+                (vault_id,),
+            ).fetchone()
+        else:
+            ks = conn.execute(
+                "SELECT questions_enc_dek FROM key_store LIMIT 1"
+            ).fetchone()
+        result = bool(ks and ks["questions_enc_dek"])
+        log.info("has_secret_questions(vault_id=%s) → %s", vault_id, result)
+        return result
 
 
 # ── Change / Reset Master Password ───────────────────────────────
 # Handled by core.vault.change_master_password (requires RSA keypair regen).
 # Kept as thin wrapper for UI backward-compatibility.
 
-def change_master_password(dek: bytes, new_password: str) -> bool:
+def change_master_password(dek: bytes, new_password: str, vault_id: int = None) -> bool:
     """Delegate to vault module which manages the RSA keypair."""
     from core.vault import change_master_password as _vault_change
-    return _vault_change(dek, new_password)
+    return _vault_change(dek, new_password, vault_id)

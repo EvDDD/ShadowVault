@@ -22,8 +22,9 @@ from core.recovery import (
 class RecoveryDialog(QDialog):
     recovered = pyqtSignal(bytes)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, vault_id: int = None):
         super().__init__(parent)
+        self._vault_id = vault_id
         self.setWindowTitle("Account Recovery — ShadowVault")
         self.setFixedSize(460, 500)
         self._build_ui()
@@ -48,7 +49,7 @@ class RecoveryDialog(QDialog):
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self._key_tab(), "🔑  Recovery Key")
-        if has_secret_questions():
+        if has_secret_questions(vault_id=self._vault_id):
             self.tabs.addTab(self._questions_tab(), "❓  Secret Questions")
         layout.addWidget(self.tabs, 1)
 
@@ -119,7 +120,7 @@ class RecoveryDialog(QDialog):
         QApplication.setOverrideCursor(QCursor(Qt.CursorShape.WaitCursor))
         QApplication.processEvents()
         try:
-            dek = unlock_with_recovery_key(key_str)
+            dek = unlock_with_recovery_key(key_str, vault_id=self._vault_id)
         finally:
             QApplication.restoreOverrideCursor()
             self.btn_key.setEnabled(True)
@@ -130,7 +131,7 @@ class RecoveryDialog(QDialog):
                 "❌  Invalid recovery key. Check format: XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX"
             )
             return
-        change_master_password(dek, new_pw)
+        change_master_password(dek, new_pw, vault_id=self._vault_id)
         QMessageBox.information(self, "Success",
             "Recovery successful. Your master password has been reset.")
         self.recovered.emit(dek)
@@ -142,7 +143,7 @@ class RecoveryDialog(QDialog):
         w = QWidget(); w.setStyleSheet("background:transparent;")
         l = QVBoxLayout(w); l.setSpacing(8); l.setContentsMargins(0, 14, 0, 0)
 
-        questions = get_secret_questions()
+        questions = get_secret_questions(vault_id=self._vault_id)
         self.answer_inputs: list[QLineEdit] = []
         for i, q in enumerate(questions):
             ql = QLabel(f"Q{i+1}: {q}")
@@ -201,7 +202,7 @@ class RecoveryDialog(QDialog):
         QApplication.setOverrideCursor(QCursor(Qt.CursorShape.WaitCursor))
         QApplication.processEvents()
         try:
-            dek = unlock_with_secret_questions(answers)
+            dek = unlock_with_secret_questions(answers, vault_id=self._vault_id)
         finally:
             QApplication.restoreOverrideCursor()
             self.btn_q.setEnabled(True)
@@ -209,7 +210,7 @@ class RecoveryDialog(QDialog):
 
         if dek is None:
             self.q_err.setText("❌  Incorrect answers. Access denied."); return
-        change_master_password(dek, new_pw)
+        change_master_password(dek, new_pw, vault_id=self._vault_id)
         QMessageBox.information(self, "Success",
             "Recovery successful. Your master password has been reset.")
         self.recovered.emit(dek)
@@ -223,11 +224,12 @@ class RecoveryDialog(QDialog):
 
 # ── SetQuestionsDialog ────────────────────────────────────────────
 class SetQuestionsDialog(QDialog):
-    def __init__(self, dek: bytes, parent=None):
+    def __init__(self, dek: bytes, parent=None, vault_id: int = None):
         super().__init__(parent)
         self.setWindowTitle("Set Secret Questions — ShadowVault")
         self.setFixedSize(480, 560)
         self._dek = dek
+        self._vault_id = vault_id
         self._build_ui()
 
     def _build_ui(self):
@@ -287,6 +289,6 @@ class SetQuestionsDialog(QDialog):
             if not q or not a:
                 self.err.setText("All questions and answers must be filled in."); return
             qa.append((q, a))
-        save_secret_questions(self._dek, qa)
+        save_secret_questions(self._dek, qa, vault_id=self._vault_id)
         QMessageBox.information(self, "Saved", "Secret questions saved successfully.")
         self.accept()

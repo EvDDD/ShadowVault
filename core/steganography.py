@@ -125,3 +125,31 @@ def estimate_capacity(image_path: str) -> int:
 def image_size_ok(image_path: str, payload_size: int) -> bool:
     """Check if image is large enough to hold payload."""
     return estimate_capacity(image_path) >= payload_size
+
+
+def peek_magic(image_path: str) -> bool:
+    """
+    Quickly check if an image contains the ShadowVault magic header.
+    Only reads enough pixels to check the 4-byte magic — does NOT
+    load the full payload. Very fast for scanning multiple images.
+    """
+    try:
+        img = Image.open(image_path).convert("RGB")
+        # Need len(_MAGIC) bytes = 4 bytes = 32 bits → ceil(32/3) = 11 pixels
+        pixels_needed = (len(_MAGIC) * 8 + 2) // 3 + 1
+        all_pixels = list(img.getdata())
+        if len(all_pixels) < pixels_needed:
+            return False
+
+        bits = []
+        for i in range(pixels_needed):
+            r, g, b = all_pixels[i]
+            bits.append(r & 1)
+            bits.append(g & 1)
+            bits.append(b & 1)
+
+        header = _bits_to_bytes(bits[:len(_MAGIC) * 8])
+        return header == _MAGIC
+    except Exception:
+        return False
+

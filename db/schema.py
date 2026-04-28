@@ -1,11 +1,25 @@
 """
 Database schema and connection management for ShadowVault.
+
+All data lives in an IN-MEMORY SQLite database — no vault.db file is ever
+written to disk. The database is serialized/deserialized to/from bytes
+for embedding into the steganography image.
+
+Requires Python >= 3.11 for sqlite3.Connection.serialize/deserialize.
 """
 import sqlite3
+import logging
 from contextlib import contextmanager
 from pathlib import Path
 
-DB_PATH = Path.home() / ".shadowvault" / "vault.db"
+log = logging.getLogger(__name__)
+
+# Directory for stego images (no DB file is stored here)
+STEGO_DIR = Path.home() / ".shadowvault"
+
+# Legacy path reference — kept so stego_manager can derive STEGO_DIR.
+# No file is ever created at this path.
+DB_PATH = STEGO_DIR / "vault.db"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS vault (
@@ -69,22 +83,65 @@ END;
 """
 
 
+# ── Shared in-memory connection ──────────────────────────────────
+
+_conn: sqlite3.Connection | None = None
+
+
+def _ensure_conn() -> sqlite3.Connection:
+    """Return the shared in-memory connection, creating it if needed."""
+    global _conn
+    if _conn is None:
+        _conn = sqlite3.connect(":memory:", check_same_thread=False)
+        _conn.row_factory = sqlite3.Row
+        _conn.execute("PRAGMA foreign_keys = ON")
+        log.info("Created new in-memory SQLite connection")
+    return _conn
+
+
 @contextmanager
 def get_connection():
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = DELETE")
+    """
+    Yield the shared in-memory connection.
+    Commits on success, rolls back on error.
+    Never closes the connection (data lives only in memory).
+    """
+    conn = _ensure_conn()
     try:
         yield conn
         conn.commit()
     except Exception:
         conn.rollback()
         raise
-    finally:
-        conn.close()
 
+
+# ── Serialization (for steganography) ────────────────────────────
+
+def load_db_from_bytes(data: bytes) -> None:
+    """
+    Load a serialized SQLite database into the in-memory connection.
+    Replaces ALL existing data in memory.
+    """
+    conn = _ensure_conn()
+    conn.deserialize(data)
+    # Re-apply connection settings after deserialize
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    log.info("Loaded %d bytes into in-memory database", len(data))
+
+
+def dump_db_to_bytes() -> bytes:
+    """
+    Serialize the in-memory database to bytes.
+    Used for embedding into the stego image.
+    """
+    conn = _ensure_conn()
+    data = conn.serialize()
+    log.info("Serialized in-memory database: %d bytes", len(data))
+    return data
+
+
+# ── Schema management ────────────────────────────────────────────
 
 def _migrate(conn):
     """
@@ -112,26 +169,40 @@ def _migrate(conn):
 
 
 def init_db():
-    with get_connection() as conn:
-        _migrate(conn)       # upgrade old schema if present
-        conn.executescript(SCHEMA)
+    """Initialize schema in the in-memory database."""
+    conn = _ensure_conn()
+    _migrate(conn)         # upgrade old schema if present
+    conn.executescript(SCHEMA)
+    conn.commit()
+    log.info("In-memory database schema initialized")
 
 
 def vault_exists() -> bool:
-    if not DB_PATH.exists():
-        return False
+    """Check if any vault exists in the in-memory database."""
     try:
-        with get_connection() as conn:
-            row = conn.execute("SELECT COUNT(*) FROM vault").fetchone()
-            return row[0] > 0
+        conn = _ensure_conn()
+        row = conn.execute("SELECT COUNT(*) FROM vault").fetchone()
+        return row[0] > 0
     except Exception:
         return False
 
 
+def close_db():
+    """Close the in-memory connection (destroys all data)."""
+    global _conn
+    if _conn is not None:
+        _conn.close()
+        _conn = None
+        log.info("In-memory database connection closed")
+
+
 def drop_all():
-    if DB_PATH.exists():
-        DB_PATH.unlink()
-    for ext in ("-wal", "-shm", "-journal"):
-        p = DB_PATH.parent / (DB_PATH.name + ext)
-        if p.exists():
-            p.unlink()
+    """
+    Reset the in-memory database and clean up any legacy files on disk.
+    """
+    close_db()
+    # Remove any leftover file-based DB from previous versions
+    for f in [DB_PATH] + [DB_PATH.parent / (DB_PATH.name + ext)
+                          for ext in ("-wal", "-shm", "-journal")]:
+        if f.exists():
+            f.unlink()

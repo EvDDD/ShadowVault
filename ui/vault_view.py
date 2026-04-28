@@ -36,6 +36,7 @@ class VaultView(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._dek: bytes | None = None
+        self._vault_id: int | None = None
         self._entries: list[VaultEntry] = []
         self._build_ui()
 
@@ -108,10 +109,13 @@ class VaultView(QWidget):
     def set_dek(self, dek: bytes):
         self._dek = dek
 
+    def set_vault_id(self, vault_id: int):
+        self._vault_id = vault_id
+
     def refresh(self, search: str = ""):
         if not self._dek:
             return
-        self._entries = get_all_entries(self._dek, search)
+        self._entries = get_all_entries(self._dek, search, vault_id=self._vault_id)
         self._populate_table(self._entries)
 
     def get_entries(self) -> list[VaultEntry]:

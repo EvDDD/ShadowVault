@@ -14,26 +14,26 @@ from PyQt6.QtGui import QFont, QIcon, QAction
 from core.vault import (
     get_vault_name, get_entry, add_entry, update_entry,
     change_master_password, has_secret_questions,
+    get_all_entries,
 )
 from ui.vault_view import VaultView
 from ui.health_view import HealthView
 from ui.entry_dialog import EntryDialog
-from ui.stego_dialog import StegoDialog
 from ui.recovery_dialog import SetQuestionsDialog
 
 _NAV = [
     ("vault",   "🔐",  "Vault"),
     ("health",  "🛡",  "Health Check"),
-    ("stego",   "🖼",  "Steganography"),
     ("settings","⚙",  "Settings"),
 ]
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, dek: bytes, recovery_key: str = ""):
+    def __init__(self, dek: bytes, recovery_key: str = "", vault_id: int = None):
         super().__init__()
         self._dek = dek
-        self._vault_name = get_vault_name()
+        self._vault_id = vault_id
+        self._vault_name = get_vault_name(vault_id)
 
         self.setWindowTitle(f"ShadowVault — {self._vault_name}")
         self.setMinimumSize(960, 640)
@@ -44,6 +44,7 @@ class MainWindow(QMainWindow):
 
         # Load vault
         self.vault_view.set_dek(dek)
+        self.vault_view.set_vault_id(vault_id)
         self.vault_view.refresh()
         self.health_view.set_entries(self.vault_view.get_entries())
 
@@ -78,11 +79,11 @@ class MainWindow(QMainWindow):
         vhl.setContentsMargins(14, 0, 14, 0)
         icon_lbl = QLabel("🔒")
         icon_lbl.setStyleSheet("font-size: 18px; background: transparent;")
-        name_lbl = QLabel(self._vault_name)
-        name_lbl.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
-        name_lbl.setStyleSheet("color: #e6edf3; background: transparent;")
+        self._name_lbl = QLabel(self._vault_name)
+        self._name_lbl.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+        self._name_lbl.setStyleSheet("color: #e6edf3; background: transparent;")
         vhl.addWidget(icon_lbl)
-        vhl.addWidget(name_lbl, 1)
+        vhl.addWidget(self._name_lbl, 1)
         sl.addWidget(vault_hdr)
 
         # Nav items
@@ -114,7 +115,7 @@ class MainWindow(QMainWindow):
 
         root.addWidget(sidebar)
 
-        # ── Main content ─────────────────────────────────────────
+        # ── Main content ─────────────────────────────────────
         self.stack = QStackedWidget()
 
         # 1. Vault View
@@ -128,15 +129,7 @@ class MainWindow(QMainWindow):
         self.health_view.entry_selected.connect(self._edit_entry)
         self.stack.addWidget(self.health_view)
 
-        # 3. Stego (placeholder — opens dialog)
-        stego_placeholder = self._page_placeholder(
-            "🖼", "Steganography",
-            "Hide or extract your encrypted vault\ninside a PNG image using LSB steganography.",
-            "Open Steganography Tool", self._open_stego
-        )
-        self.stack.addWidget(stego_placeholder)
-
-        # 4. Settings
+        # 3. Settings
         self.stack.addWidget(self._build_settings_page())
 
         root.addWidget(self.stack, 1)
@@ -229,11 +222,11 @@ class MainWindow(QMainWindow):
             "Setup Questions", self._setup_questions
         ))
 
-        layout.addWidget(section("Backup"))
+        layout.addWidget(section("Steganography"))
         layout.addWidget(setting_row(
-            "Steganography Backup",
-            "Hide your vault inside a PNG image for secure offline backup.",
-            "Open Stego Tool", self._open_stego
+            "Change Cover Image",
+            "Change the PNG image used to hide your vault data.",
+            "Change Image", self._change_cover
         ))
 
         layout.addWidget(section("Danger Zone"))
@@ -269,10 +262,10 @@ class MainWindow(QMainWindow):
 
         tools_menu = mb.addMenu("Tools")
         tools_menu.addAction(action("Password Health Check",   self._goto_health))
-        tools_menu.addAction(action("Steganography",           self._open_stego))
         tools_menu.addSeparator()
         tools_menu.addAction(action("Change Master Password",  self._change_password))
         tools_menu.addAction(action("Setup Secret Questions",  self._setup_questions))
+        tools_menu.addAction(action("Change Cover Image",      self._change_cover))
 
     # ── Navigation ────────────────────────────────────────────────
 
@@ -288,12 +281,12 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot()
     def _new_entry(self):
-        dlg = EntryDialog(parent=self)
+        dlg = EntryDialog(vault_id=self._vault_id, parent=self)
         dlg.saved.connect(self._on_entry_saved_new)
         dlg.exec()
 
     def _on_entry_saved_new(self, entry):
-        add_entry(self._dek, entry)
+        add_entry(self._dek, entry, vault_id=self._vault_id)
         self.vault_view.refresh(self.vault_view.search.text())
         self.health_view.set_entries(self.vault_view.get_entries())
 
@@ -302,7 +295,7 @@ class MainWindow(QMainWindow):
         entry = get_entry(self._dek, entry_id)
         if not entry:
             return
-        dlg = EntryDialog(entry=entry, parent=self)
+        dlg = EntryDialog(entry=entry, vault_id=self._vault_id, parent=self)
         dlg.saved.connect(self._on_entry_saved_edit)
         dlg.exec()
         # Switch to vault view
@@ -316,9 +309,24 @@ class MainWindow(QMainWindow):
 
     # ── Dialogs ──────────────────────────────────────────────────
 
-    def _open_stego(self):
-        dlg = StegoDialog(self)
-        dlg.exec()
+    def _change_cover(self):
+        from PyQt6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select New Cover Image", "",
+            "PNG Images (*.png);;All Images (*.png *.jpg *.jpeg *.bmp)"
+        )
+        if not path:
+            return
+        try:
+            from core.stego_manager import StegoManager
+            StegoManager.change_cover(path)
+            QMessageBox.information(
+                self, "Done",
+                "Cover image changed successfully.\n"
+                "Your vault data has been re-embedded into the new image."
+            )
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Failed to change cover image:\n{e}")
 
     def _show_recovery_key(self, key: str):
         from ui.recovery_key_dialog import RecoveryKeyDialog
@@ -333,7 +341,7 @@ class MainWindow(QMainWindow):
         if not ok or not old_pw:
             return
         from core.vault import unlock_vault
-        dek_check = unlock_vault(old_pw)
+        dek_check = unlock_vault(old_pw, self._vault_id)
         if dek_check is None:
             QMessageBox.warning(self, "Error", "Incorrect current password.")
             return
@@ -353,11 +361,11 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Error", "Passwords do not match.")
             return
 
-        change_master_password(self._dek, new_pw)
+        change_master_password(self._dek, new_pw, self._vault_id)
         QMessageBox.information(self, "Done", "Master password changed successfully.")
 
     def _setup_questions(self):
-        dlg = SetQuestionsDialog(self._dek, parent=self)
+        dlg = SetQuestionsDialog(self._dek, parent=self, vault_id=self._vault_id)
         dlg.exec()
 
     def _lock(self):
@@ -370,23 +378,71 @@ class MainWindow(QMainWindow):
         else:
             self.close()
 
-    def _on_relocked(self, dek: bytes, recovery: str):
+    def _on_relocked(self, dek: bytes, recovery: str, vault_id: int):
         self._dek = dek
+        self._vault_id = vault_id
+        self._vault_name = get_vault_name(vault_id)
+        self.setWindowTitle(f"ShadowVault — {self._vault_name}")
+        self._name_lbl.setText(self._vault_name)
         self.vault_view.set_dek(dek)
+        self.vault_view.set_vault_id(vault_id)
         self.vault_view.refresh()
         self.health_view.set_entries(self.vault_view.get_entries())
 
     def _delete_vault(self):
-        reply = QMessageBox.critical(
+        # Step 1: Verify master password
+        pw, ok = QInputDialog.getText(
             self, "Delete Vault",
-            "This will PERMANENTLY delete all your passwords.\n\nType DELETE to confirm:",
-            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
+            "Enter your master password to confirm deletion:",
+            QLineEdit.EchoMode.Password
         )
-        if reply != QMessageBox.StandardButton.Ok:
+        if not ok or not pw:
             return
-        text, ok = QInputDialog.getText(self, "Confirm", "Type DELETE to confirm:")
-        if ok and text.strip().upper() == "DELETE":
-            from db.schema import drop_all
-            drop_all()
-            QMessageBox.information(self, "Deleted", "Vault deleted. The application will now close.")
+
+        from core.vault import unlock_vault
+        dek_check = unlock_vault(pw, self._vault_id)
+        if dek_check is None:
+            QMessageBox.warning(self, "Error", "Incorrect master password.")
+            return
+
+        # Step 2: Confirm with "DELETE"
+        text, ok = QInputDialog.getText(
+            self, "Confirm Deletion",
+            "This will PERMANENTLY delete this vault and all its passwords.\n\n"
+            "Type DELETE to confirm:"
+        )
+        if not ok or text.strip().upper() != "DELETE":
+            QMessageBox.information(self, "Cancelled", "Vault deletion cancelled.")
+            return
+
+        # Step 3: Delete vault
+        from core.vault import delete_vault
+        remaining = delete_vault(self._vault_id)
+
+        if remaining == 0:
+            # Last vault deleted — clean up stego files + in-memory DB
+            from core.stego_manager import StegoManager
+            from db.schema import close_db
+            StegoManager.delete_all()
+            close_db()
+            QMessageBox.information(
+                self, "Deleted",
+                "Vault deleted. No vaults remaining.\n"
+                "The application will now close."
+            )
             self.close()
+        else:
+            QMessageBox.information(
+                self, "Deleted",
+                f"Vault \"{self._vault_name}\" deleted.\n"
+                f"{remaining} vault(s) remaining. Please log in again."
+            )
+            # Re-embed DB (without the deleted vault) then relock
+            try:
+                from core.stego_manager import StegoManager
+                if StegoManager.has_stego():
+                    StegoManager.embed_db()
+            except Exception:
+                pass
+            self._lock()
+
