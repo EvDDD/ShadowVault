@@ -211,10 +211,24 @@ class BigInt:
         q_digits = [0] * (m + 1)
 
         for j in range(m, -1, -1):
-            # Estimate q̂ = (u[j+n]*BASE + u[j+n-1]) // v[n-1]
+            # Estimate q̂ = (u[j+n]*BASE + u[j+n-1]) // v[n-1]  (Knuth D3)
             num  = u[j + n] * _BASE + u[j + n - 1]
             dhat = v[n - 1]
-            qhat = min(num // dhat, _MASK)
+            qhat = num // dhat
+            rhat = num % dhat
+
+            # Clamp to BASE-1
+            if qhat >= _BASE:
+                qhat = _MASK
+                rhat = num - qhat * dhat
+
+            # Refine with second-most-significant digit of divisor
+            # Without this, qhat can be 2 too large → add-back won't fix it
+            while qhat * v[n - 2] > rhat * _BASE + u[j + n - 2]:
+                qhat -= 1
+                rhat += dhat
+                if rhat >= _BASE:
+                    break
 
             # Multiply and subtract: u[j..j+n] -= qhat * v[0..n-1]
             borrow = 0
@@ -238,8 +252,8 @@ class BigInt:
 
             q_digits[j] = qhat
 
-            # Add back if we subtracted too much
-            if borrow:
+            # Add back if we subtracted too much (Knuth D6)
+            while borrow:
                 q_digits[j] -= 1
                 carry = 0
                 for i in range(n):
@@ -247,6 +261,9 @@ class BigInt:
                     u[j + i] = s & _MASK
                     carry    = s >> 32
                 u[j + n] = (u[j + n] + carry) & _MASK
+                # Re-check borrow (now borrow is always 0 after one add-back
+                # since qhat is at most 1 too large after refinement)
+                borrow = 0
 
         # Remainder is in u[0..n-1], un-normalise by >> shift
         r_big = BigInt()
