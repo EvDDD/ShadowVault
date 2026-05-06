@@ -17,13 +17,24 @@ header "SVLT" embedded in the LSB bits. No config file needed.
 from __future__ import annotations
 import gzip
 import logging
+import random
 from pathlib import Path
+
+from PIL import Image
 
 from core.steganography import hide, unhide, estimate_capacity, peek_magic
 
 log = logging.getLogger(__name__)
 
 STEGO_DIR = Path.home() / ".shadowvault"
+
+# Realistic decoy filenames — look like normal personal photos
+_DECOY_NAMES = [
+    "sunset", "beach", "vacation", "family_dinner", "birthday",
+    "garden", "coffee_shop", "mountain_view", "city_night",
+    "weekend_trip", "pet_photo", "graduation", "park_walk",
+    "lake_view", "rooftop", "flowers", "rainy_day",
+]
 
 
 class StegoManager:
@@ -48,6 +59,59 @@ class StegoManager:
     def has_stego(cls) -> bool:
         """True if a stego image with valid magic header exists."""
         return cls.find_stego_image() is not None
+
+    # ── Decoy images ─────────────────────────────────────────────
+
+    @staticmethod
+    def populate_decoys(
+        count: int = 10,
+        exclude_name: str | None = None,
+    ) -> list[Path]:
+        """
+        Generate realistic-looking decoy PNG images in STEGO_DIR.
+
+        Each decoy is a procedurally generated gradient/noise image with
+        randomized dimensions, colors, and patterns so they don't all
+        look identical. The filenames come from _DECOY_NAMES.
+
+        Args:
+            count:        How many decoy images to create (default 10).
+            exclude_name: Stem name to skip (the real stego image name).
+
+        Returns:
+            List of paths to created decoy images.
+        """
+        STEGO_DIR.mkdir(parents=True, exist_ok=True)
+
+        # Pick random names from the pool, skipping the stego image name
+        available = [n for n in _DECOY_NAMES if n != exclude_name]
+        random.shuffle(available)
+        names_to_use = available[:count]
+
+        created: list[Path] = []
+        for name in names_to_use:
+            dest = STEGO_DIR / f"{name}.png"
+            if dest.exists():
+                continue  # don't overwrite existing files
+
+            try:
+                img = _download_decoy_image()
+                img.save(str(dest), format="PNG", compress_level=6)
+                created.append(dest)
+                log.info("Created decoy image: %s", dest.name)
+            except Exception as e:
+                log.warning("Download failed for %s, trying fallback: %s",
+                            name, e)
+                try:
+                    img = _generate_fallback_image()
+                    img.save(str(dest), format="PNG", compress_level=6)
+                    created.append(dest)
+                    log.info("Created fallback decoy: %s", dest.name)
+                except Exception as e2:
+                    log.warning("Fallback also failed for %s: %s", name, e2)
+
+        log.info("Populated %d decoy images in %s", len(created), STEGO_DIR)
+        return created
 
     # ── Setup ────────────────────────────────────────────────────
 
@@ -214,3 +278,64 @@ class StegoManager:
             except Exception:
                 pass
         return info
+
+# ── Decoy image helpers (module-level) ───────────────────────────
+
+def _download_decoy_image() -> Image.Image:
+    """
+    Download a random real photograph from Lorem Picsum.
+
+    Uses https://picsum.photos/{w}/{h} which returns a random
+    high-quality photo each time. No API key required.
+    The response is a JPEG — we convert to RGB PIL Image.
+    """
+    import io
+    import urllib.request
+
+    w = random.randint(800, 1400)
+    h = random.randint(600, 1100)
+    url = f"https://picsum.photos/{w}/{h}"
+
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (compatible; ShadowVault/1.0)"
+    })
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        data = resp.read()
+
+    img = Image.open(io.BytesIO(data)).convert("RGB")
+    log.debug("Downloaded decoy %dx%d from picsum.photos", img.size[0], img.size[1])
+    return img
+
+
+def _generate_fallback_image() -> Image.Image:
+    """
+    Offline fallback: generate a gradient + noise image using numpy.
+    Used when picsum.photos is unreachable.
+    """
+    import numpy as np
+
+    w = random.randint(600, 1400)
+    h = random.randint(600, 1400)
+
+    c1 = np.array([random.randint(0, 255) for _ in range(3)], dtype=np.float64)
+    c2 = np.array([random.randint(0, 255) for _ in range(3)], dtype=np.float64)
+
+    direction = random.randint(0, 2)
+    if direction == 0:
+        t = np.linspace(0, 1, w, dtype=np.float64)[np.newaxis, :]
+        t = np.broadcast_to(t, (h, w))
+    elif direction == 1:
+        t = np.linspace(0, 1, h, dtype=np.float64)[:, np.newaxis]
+        t = np.broadcast_to(t, (h, w))
+    else:
+        ys = np.arange(h, dtype=np.float64)[:, np.newaxis]
+        xs = np.arange(w, dtype=np.float64)[np.newaxis, :]
+        t = (xs + ys) / max(w + h - 2, 1)
+
+    base = (1 - t)[..., np.newaxis] * c1 + t[..., np.newaxis] * c2
+
+    noise_amp = random.randint(15, 40)
+    noise = np.random.randint(-noise_amp, noise_amp + 1, size=(h, w, 3))
+
+    result = np.clip(base + noise, 0, 255).astype(np.uint8)
+    return Image.fromarray(result, "RGB")
