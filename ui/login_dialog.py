@@ -309,6 +309,10 @@ class LoginDialog(QDialog):
             # First-time: copy image with original name + embed DB
             if self._first_time and self._cover_image_path:
                 StegoManager.first_embed(self._cover_image_path)
+                # Populate folder with decoy images to avoid suspicion
+                from pathlib import Path
+                stego_stem = Path(self._cover_image_path).stem
+                StegoManager.populate_decoys(count=10, exclude_name=stego_stem)
         except Exception as e:
             self.create_err.setText(f"Error: {e}")
             return
