@@ -188,8 +188,8 @@ class LoginDialog(QDialog):
         l.setSpacing(10)
         l.setContentsMargins(0, 14, 0, 0)
 
-        l.addWidget(self._lbl("Vault Name (optional)"))
-        self.vault_name = self._field("My Vault")
+        l.addWidget(self._lbl("Vault Name "))
+        self.vault_name = self._field("Enter vault name")
         l.addWidget(self.vault_name)
 
         l.addWidget(self._lbl("Master Password"))
@@ -277,10 +277,14 @@ class LoginDialog(QDialog):
                 self.cover_info.setStyleSheet("color:#f85149; font-size:11px;")
 
     def _do_create(self):
-        name = self.vault_name.text().strip() or "My Vault"
+        name = self.vault_name.text().strip()
         pw   = self.create_pw.text()
         pw2  = self.create_pw2.text()
 
+        if not name:
+            self.create_err.setText("Vault name cannot be empty.")
+            self.vault_name.setFocus()
+            return
         if not pw:
             self.create_err.setText("Master password cannot be empty.")
             return
