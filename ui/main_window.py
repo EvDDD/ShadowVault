@@ -387,7 +387,10 @@ class MainWindow(QMainWindow):
         self.vault_view.set_dek(dek)
         self.vault_view.set_vault_id(vault_id)
         self.vault_view.refresh()
+        self.health_view.reset()
         self.health_view.set_entries(self.vault_view.get_entries())
+        if recovery:
+            self._show_recovery_key(recovery)
 
     def _delete_vault(self):
         # Step 1: Verify master password

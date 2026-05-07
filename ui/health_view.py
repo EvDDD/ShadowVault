@@ -122,6 +122,15 @@ class HealthView(QWidget):
     def set_entries(self, entries):
         self._entries = entries
 
+    def reset(self):
+        """Clear scan results and restore placeholder (used on vault switch)."""
+        self._entries = []
+        self.stat_total._val_lbl.setText("0")
+        self.stat_weak._val_lbl.setText("0")
+        self.stat_dupl._val_lbl.setText("0")
+        self.stat_ok._val_lbl.setText("0")
+        self._show_placeholder()
+
     def run_scan(self):
         if not self._entries:
             return
