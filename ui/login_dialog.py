@@ -136,7 +136,7 @@ class LoginDialog(QDialog):
         sep.setStyleSheet("color:#8b949e; font-size:12px;")
         l.addWidget(sep)
 
-        btn_rec = QPushButton("Recover with Emergency Key")
+        btn_rec = QPushButton("Recover Your Password")
         btn_rec.setObjectName("btnSecondary")
         btn_rec.setFixedHeight(36)
         btn_rec.clicked.connect(self._open_recovery)

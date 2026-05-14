@@ -201,3 +201,32 @@ class TestSecretQuestions:
         assert has_secret_questions(self.vid) is False
         save_secret_questions(self.dek, self.qa, self.vid)
         assert has_secret_questions(self.vid) is True
+
+    def test_save_more_than_3_questions(self):
+        """TC-RC-009: Save and unlock with 5 custom questions"""
+        qa5 = [
+            ("Thành phố?", "Hanoi"),
+            ("Trường?", "HUST"),
+            ("Pet?", "Dog"),
+            ("Màu yêu thích?", "Blue"),
+            ("Món ăn?", "Pho"),
+        ]
+        assert save_secret_questions(self.dek, qa5, self.vid) is True
+        dek2 = unlock_with_secret_questions(
+            ["Hanoi", "HUST", "Dog", "Blue", "Pho"], self.vid
+        )
+        assert dek2 == self.dek
+
+    def test_more_than_3_wrong_answer(self):
+        """TC-RC-010: 5 questions, 1 wrong answer → fails"""
+        qa5 = [
+            ("Thành phố?", "Hanoi"),
+            ("Trường?", "HUST"),
+            ("Pet?", "Dog"),
+            ("Màu yêu thích?", "Blue"),
+            ("Món ăn?", "Pho"),
+        ]
+        save_secret_questions(self.dek, qa5, self.vid)
+        assert unlock_with_secret_questions(
+            ["Hanoi", "HUST", "Dog", "Blue", "WRONG"], self.vid
+        ) is None
